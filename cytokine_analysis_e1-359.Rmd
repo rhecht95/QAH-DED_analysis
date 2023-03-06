@@ -1,0 +1,230 @@
+---
+title: "RayBiotech DED-Cytokine Array Analysis "
+subtitle: "e1-359"
+output: 
+  html_document:
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r include=FALSE}
+library(tidyverse)
+library(readxl)
+library(janitor)
+library(here)
+library(kableExtra)
+library(RColorBrewer)
+```
+
+
+
+# Tidying the Data
+
+**Sample Guide:**
+```{r echo=FALSE, warning=FALSE}
+sample_names <- c("healthy-ser-cntrl", "CMM2-1b", "CMM2-1c", "83b", "76-OD", "81-OS", "83a", "73a-OD")
+
+sample_codes <- NULL
+for (i in 1:8) {
+    code <- paste0("SA", i)
+    sample_codes <- append(sample_codes, code)
+}
+
+sample_codes_names <- data_frame(sample_codes, sample_names)
+sample_codes_names %>% 
+  kable(align = "cc") %>% 
+  kableExtra::kable_styling()
+```
+
+Some notes on the samples and the data:
+
+  - The serum samples were collected by differnt individuals and may have been processed differently. For example, different protocols for isolating plasma or serum.
+    - SA1 provided by the Knight BioLibrary
+    - SA2 processed by Tammie Haley
+    - SA3 processed by Tammie Haley
+    - SA4 (83b) was collected by Paul Yang
+
+## Convert to Long format
+
+Load in output from RayBiotech Excel analysis tool
+```{r}
+#cytokine concentrations calculated from linear regression standard curves
+cytokines_linReg <- read_excel(path = here("data/Stdev-sheet_unprotected.xlsx"), sheet = "Stdev_linear-reg")
+
+#cytokine concentrations calculated from log-log regression standard curves
+cytokines_logReg <- read_excel(path = here("data/Stdev-sheet_unprotected.xlsx"), sheet = "Stdev_log-reg")
+```
+
+
+Make data *long* rather than *wide* with `pivot_longer()`
+```{r}
+cytokines_linReg <-  pivot_longer(cytokines_linReg, cols = 2:ncol(cytokines_linReg), names_to = "sample", values_to = "concentration")
+cytokines_logReg <- pivot_longer(cytokines_logReg, cols = 2:ncol(cytokines_logReg), names_to = "sample", values_to = "concentration")
+
+
+cytokine_data_list <- list("cytokines_linReg" = cytokines_linReg)
+                           #, "cytokines_logReg" = cytokines_logReg)
+```
+
+
+## Separate the concentration and SD into separate variables
+
+Strategy = Use Regex to:
+
+ - identify numbers *before* a "+" --> cytokine concentration value
+ - identify numbers *after* a "-" --> standard deviation value
+ 
+```{r}
+#regex patterns to find numbers before and after the plus and minus symbols in the dataframe
+before_plus_pattern <- "[:digit:]+"
+after_minus_pattern <- "[:digit:]+$"
+
+#pattern to recognize "+/-" and split string on either side
+split_pattern <- "\\+/-"
+
+
+#function for make new cols for SD and concentration using str_extract
+tidy_split <- function(dataframe, pattern1, pattern2) {
+  dataframe <- dataframe %>% 
+    mutate(SD = str_extract(string = dataframe$concentration, pattern = pattern1),
+            concentration = str_extract(string = dataframe$concentration, pattern = pattern2)) %>%
+    mutate(SD = as.integer(SD),
+           concentration = as.integer(concentration)) %>% 
+    arrange(sample)
+}
+
+cytokine_data_list <- lapply(cytokine_data_list, tidy_split, pattern1 = after_minus_pattern, pattern2 = before_plus_pattern)
+
+```
+# Parametric Tests
+
+Determine what kind of stats will be used for testing this data
+
+```{r}
+car::qqPlot(cytokine_data_list[[1]]$concentration)
+```
+Data do not appear parametric by visualization
+
+```{r}
+shapiro.test(cytokine_data_list[[1]]$concentration)
+```
+
+p << 0.05 : Data are not normally distributed
+
+# Displaying the Data
+
+
+## Heat Map {.tabset}
+Given the size and complexity of the data, heatmap may be a good start to understand broad patterns. After exploring large-scale patterns, I can create other plots with more nuanced comparisons
+
+
+Plotting function
+```{r}
+#remove SDs, convert to matrix, heatmap()
+heatmap_plot3 <- function(dataframe,legend_name, plotvar = "concentration", multiplier = 1, ...) { 
+
+  fill_value <- NULL
+  if(multiplier == 1){
+    fill_value <- unlist(dataframe[plotvar])
+    legend_name_addon <- ""
+  }
+  else if (multiplier == "log2"){
+    fill_value <- unlist(log2(dataframe[plotvar]))
+    legend_name_addon <- "(Log2)"
+  }
+ 
+  dataframe %>%
+    select(!"SD") %>%
+      ggplot(mapping = aes(x = cytokine, y = sample, fill = fill_value ))+
+      geom_tile() +
+      xlab("Cytokine") +
+      ylab("Sample") +
+      scale_fill_continuous(type = "viridis", name = paste(legend_name, " ", legend_name_addon))+
+      theme_classic()+
+      theme(axis.text.x = element_text(angle = 90, vjust = 0.5))
+}
+
+```
+
+### Serum and Aqueous Humor Together {.tabset}
+
+These data were normalized to positive controls on the array, but not to any of the positive control *samples* we included (such as healthy control serum or aqueous humor)
+
+#### Raw Concentration Values
+
+```{r, fig.width=12, fig.height=5}
+lapply(cytokine_data_list, heatmap_plot3 , legend_name = "Concentration", multiplier = "1")
+```
+
+
+#### Log2 Transformation
+
+The data span a large range of concentrations so I'm plotting it on a log scale for legibility
+```{r, fig.width=12, fig.height=5}
+lapply(cytokine_data_list, heatmap_plot3 , legend_name = "Concentration", multiplier = "log2")
+```
+
+
+### Serum Only Data {.tabset}
+
+Since we have a healthy serum positive control (*SA1*), I can normalize the MAR serum to this sample:
+
+  - Fold Change = y/x
+  - Log2 FC = log2(y) - log2(x)
+
+```{r, fig.width=12, fig.height=5}
+#keep only the serum samples in each list (SA1 - SA4)
+serum_samples <- c("SA1", "SA2", "SA3","SA4")
+cytokine_serum_list <- lapply(cytokine_data_list, filter, sample == "SA2" | sample == "SA1" | sample == "SA3" | sample == "SA4")
+
+#function for normalizing to SA1; "Fold Change" (y/x)
+SA1_normalize <- function(df){
+  df <- df %>% 
+    mutate(FC = (concentration/concentration[df$sample == "SA1"]),
+           FC = round(FC, digits = 3)) %>% 
+    mutate(log2_FC = log2(concentration) - log2(concentration[df$sample == "SA1"]),
+           log2_FC = round(log2_FC, digits = 3))
+}
+
+
+#list with dataframes that only have serum samples and concentration is normalized to SA1
+cytokine_serum_list <- lapply(cytokine_serum_list, SA1_normalize)
+
+```
+
+
+
+#### Fold Change in Concentration
+
+Fold Change = y/x
+```{r, fig.width=12, fig.height=5}
+lapply(cytokine_serum_list, heatmap_plot3, plotvar = "FC", legend_name = "Fold Change", multiplier = 1)
+```
+
+#### Log2 Fold Change in Concentration
+
+Log2 FC = log2(y) - log2(x)
+```{r, fig.width=12, fig.height=5}
+lapply(cytokine_serum_list, heatmap_plot3, plotvar = "log2_FC", legend_name = "Fold Change", multiplier = 1)
+```
+
+**Observations**
+
+  - IL-4 is not present in SA1 (concentration == 0), so there are several *infinite* or *NA* values in the normalized data that come from dividing by 0
+
+
+## Volcano Plot
+
+After calculating p-values I can identify the cytokines undergoing the most significant with a volcano plot
+
+**Statistical** Test: `Wilcox Test`
+
+  - Variables: 1
+  - Quantitative data
+  - Non-parametric
+  
+Determined using the [flow chart for statistical tests](https://statsandr.com/blog/files/overview-statistical-tests-statsandr.pdf)
