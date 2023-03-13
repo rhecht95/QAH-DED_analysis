@@ -230,3 +230,9 @@ After calculating p-values I can identify the cytokines undergoing the most sign
 Determined using the [flow chart for statistical tests](https://statsandr.com/blog/files/overview-statistical-tests-statsandr.pdf)
 
 
+Get the concentration values of just SA1 as a vector
+
+
+Make comparisons using `group_by` with the rest of the samples
+
+
